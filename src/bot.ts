@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Partials } from 'discord.js';
 import { database } from './database';
 import dotenv from 'dotenv';
 
@@ -9,14 +9,28 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions
+  ],
+  partials: [Partials.Message, Partials.Reaction]
 });
 
-const HOLDER_ROLE_NAME = 'Protardio Holder';
+const HOLDER_ROLE_NAME = 'Protardio Citizen';
+
+// Reaction role mapping: emoji -> role name
+const REACTION_ROLES: Record<string, string> = {
+  '🛠️': 'Builder',
+  '🎨': 'Creator',
+  '📺': 'Streamer',
+  '⚔️': 'Raider'
+};
 
 function getGuildId(): string {
   return process.env.DISCORD_GUILD_ID!;
+}
+
+function getRolePickerMessageId(): string | undefined {
+  return process.env.ROLE_PICKER_MESSAGE_ID;
 }
 
 let isReady = false;
@@ -47,6 +61,78 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.content === '!stats') {
     const count = database.getVerifiedCount();
     message.reply(`Total verified Protardio holders: ${count}`);
+  }
+});
+
+// Reaction role handler - add role
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  if (user.bot) return;
+
+  // Handle partial reactions
+  if (reaction.partial) {
+    try {
+      await reaction.fetch();
+    } catch (error) {
+      console.error('Error fetching reaction:', error);
+      return;
+    }
+  }
+
+  const messageId = getRolePickerMessageId();
+  if (!messageId || reaction.message.id !== messageId) return;
+
+  const emoji = reaction.emoji.name;
+  if (!emoji || !REACTION_ROLES[emoji]) return;
+
+  const roleName = REACTION_ROLES[emoji];
+
+  try {
+    const guild = await client.guilds.fetch(getGuildId());
+    const member = await guild.members.fetch(user.id);
+    const role = guild.roles.cache.find(r => r.name === roleName);
+
+    if (role) {
+      await member.roles.add(role);
+      console.log(`Added ${roleName} role to ${user.tag}`);
+    }
+  } catch (error) {
+    console.error('Error adding reaction role:', error);
+  }
+});
+
+// Reaction role handler - remove role
+client.on(Events.MessageReactionRemove, async (reaction, user) => {
+  if (user.bot) return;
+
+  // Handle partial reactions
+  if (reaction.partial) {
+    try {
+      await reaction.fetch();
+    } catch (error) {
+      console.error('Error fetching reaction:', error);
+      return;
+    }
+  }
+
+  const messageId = getRolePickerMessageId();
+  if (!messageId || reaction.message.id !== messageId) return;
+
+  const emoji = reaction.emoji.name;
+  if (!emoji || !REACTION_ROLES[emoji]) return;
+
+  const roleName = REACTION_ROLES[emoji];
+
+  try {
+    const guild = await client.guilds.fetch(getGuildId());
+    const member = await guild.members.fetch(user.id);
+    const role = guild.roles.cache.find(r => r.name === roleName);
+
+    if (role && member.roles.cache.has(role.id)) {
+      await member.roles.remove(role);
+      console.log(`Removed ${roleName} role from ${user.tag}`);
+    }
+  } catch (error) {
+    console.error('Error removing reaction role:', error);
   }
 });
 
