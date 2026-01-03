@@ -60,7 +60,7 @@ interface CollectionStats {
   };
 }
 
-interface Sale {
+export interface Sale {
   id: string;
   saleId: string;
   token: {
