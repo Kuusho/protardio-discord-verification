@@ -1,12 +1,12 @@
-import { createPublicClient, http, PublicClient } from 'viem';
+import { createPublicClient, http } from 'viem';
 import { base } from 'viem/chains';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-let client: PublicClient | null = null;
+let client: ReturnType<typeof createPublicClient> | null = null;
 
-function getClient(): PublicClient {
+function getClient() {
   if (!client) {
     client = createPublicClient({
       chain: base,
