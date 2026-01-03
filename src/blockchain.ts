@@ -1,17 +1,17 @@
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, http, PublicClient } from 'viem';
 import { base } from 'viem/chains';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-let client: ReturnType<typeof createPublicClient> | null = null;
+let client: PublicClient | null = null;
 
-function getClient() {
+function getClient(): PublicClient {
   if (!client) {
     client = createPublicClient({
       chain: base,
       transport: http(process.env.BASE_RPC_URL || 'https://mainnet.base.org')
-    });
+    }) as PublicClient;
   }
   return client;
 }
