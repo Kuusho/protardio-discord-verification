@@ -32,7 +32,9 @@ const HOLDER_ROLE_NAME = 'Protardio Citizen';
 const UNVERIFIED_ROLE_NAME = 'Unverified';
 
 function getBaseUrl(): string {
-  return process.env.BASE_URL || 'http://localhost:3000';
+  const url = process.env.BASE_URL || 'http://localhost:3000';
+  // Remove trailing slash if present
+  return url.endsWith('/') ? url.slice(0, -1) : url;
 }
 
 function getGuildId(): string {
@@ -263,7 +265,7 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '!sales', value: 'Show recent sales', inline: true },
         { name: '!analytics', value: 'Full collection stats', inline: true }
       )
-      .setFooter({ text: 'Protardio Discord Bot' });
+      .setFooter({ text: 'Protardion Prime' });
 
     message.reply({ embeds: [embed] });
   }

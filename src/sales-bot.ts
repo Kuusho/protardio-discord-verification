@@ -79,7 +79,7 @@ async function postSale(sale: Sale): Promise<void> {
       { name: 'From', value: truncateAddress(sale.from), inline: true },
       { name: 'To', value: truncateAddress(sale.to), inline: true }
     )
-    .setFooter({ text: 'Protardio Sales Bot' })
+    .setFooter({ text: 'Protardion Prime' })
     .setTimestamp(new Date(sale.timestamp * 1000));
 
   // Add link to transaction

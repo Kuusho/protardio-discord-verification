@@ -1,7 +1,7 @@
 {
   "name": "protardio-discord-verification",
   "version": "1.0.0",
-  "description": "Protardio Discord verification bot",
+  "description": "Protardion Prime - Discord verification bot",
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",

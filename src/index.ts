@@ -69,7 +69,7 @@ app.get('/auth/discord', authLimiter, async (req: Request, res: Response) => {
     client_id: DISCORD_CLIENT_ID,
     redirect_uri: DISCORD_REDIRECT_URI,
     response_type: 'code',
-    scope: 'identify',
+    scope: 'identify guilds.join',
     state: sessionId // Pass session ID via state parameter
   });
 
@@ -133,10 +133,28 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
 
     const discordUser = await userResponse.json() as { id: string; username: string };
 
+    // === AUTO-JOIN USER TO SERVER ===
+    const guildId = process.env.DISCORD_GUILD_ID!;
+    try {
+      await fetch(`https://discord.com/api/guilds/${guildId}/members/${discordUser.id}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bot ${process.env.DISCORD_BOT_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          access_token: accessToken
+        })
+      });
+      console.log(`Added/confirmed user ${discordUser.username} in guild`);
+    } catch (joinError) {
+      console.log('User may already be in guild or join failed:', joinError);
+    }
+
     // === MULTI-WALLET VERIFICATION ===
-    // Get ALL wallets linked to this Farcaster account
+    // Get ALL wallets linked to this Farcaster account (if FID provided)
     console.log(`Fetching all wallets for FID: ${pending.fid}`);
-    const farcasterWallets = await getFarcasterWallets(pending.fid);
+    const farcasterWallets = pending.fid > 0 ? await getFarcasterWallets(pending.fid) : [];
 
     // Also include the wallet they submitted (in case it's not linked yet)
     const allWallets = [...new Set([pending.wallet.toLowerCase(), ...farcasterWallets])];
@@ -157,9 +175,31 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
     console.log(`Total Protardio balance across all wallets: ${totalBalance}`);
 
     if (totalBalance > 0 && holdingWallet) {
-      // === SYBIL CHECK ===
-      const sybilScore = await calculateSybilScore(pending.fid);
-      const fcUser = await getFarcasterUser(pending.fid);
+      // === CHECK IF FID ALREADY USED (skip for wallet-only users) ===
+      if (pending.fid > 0) {
+        const existingFidVerification = await supabaseDatabase.getVerificationByFid(pending.fid);
+        if (existingFidVerification && existingFidVerification.discord_id !== discordUser.id) {
+          await supabaseDatabase.deletePending(sessionId);
+          res.send(renderErrorPage(
+            `This Farcaster account (FID ${pending.fid}) is already linked to another Discord account (${existingFidVerification.discord_username}). Each Farcaster account can only verify one Discord account.`
+          ));
+          return;
+        }
+      }
+
+      // === CHECK IF WALLET ALREADY USED ===
+      const existingVerification = await supabaseDatabase.getVerificationByWallet(holdingWallet);
+      if (existingVerification && existingVerification.discord_id !== discordUser.id) {
+        await supabaseDatabase.deletePending(sessionId);
+        res.send(renderErrorPage(
+          `This wallet is already linked to another Discord account (${existingVerification.discord_username}). Each wallet can only verify one account.`
+        ));
+        return;
+      }
+
+      // === SYBIL CHECK (skip for wallet-only users) ===
+      const sybilScore = pending.fid > 0 ? await calculateSybilScore(pending.fid) : 0;
+      const fcUser = pending.fid > 0 ? await getFarcasterUser(pending.fid) : null;
       console.log(`Sybil score for FID ${pending.fid}: ${sybilScore}`);
 
       // Assign Discord role
@@ -179,10 +219,13 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
         await supabaseDatabase.deletePending(sessionId);
 
         // Success page
+        const displayName = pending.fid > 0
+          ? (fcUser?.username || `FID ${pending.fid}`)
+          : `Wallet ${holdingWallet.slice(0, 6)}...${holdingWallet.slice(-4)}`;
         res.send(renderSuccessPage(
           discordUser.username,
           totalBalance,
-          fcUser?.username || `FID ${pending.fid}`,
+          displayName,
           sybilScore
         ));
         return;
@@ -202,6 +245,112 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
     res.status(500).send(renderErrorPage('An error occurred during verification'));
     return;
   }
+});
+
+// Farcaster verification from Discord button
+app.get('/verify', authLimiter, async (req: Request, res: Response) => {
+  const { discord_id } = req.query;
+
+  if (!discord_id || !/^\d{17,20}$/.test(discord_id as string)) {
+    res.status(400).send(renderErrorPage('Invalid or missing Discord ID'));
+    return;
+  }
+
+  res.send(renderFarcasterVerifyPage(discord_id as string));
+});
+
+app.post('/verify', authLimiter, async (req: Request, res: Response) => {
+  const { discord_id, fid, wallet } = req.body;
+
+  // Validate discord_id
+  if (!discord_id || !/^\d{17,20}$/.test(discord_id)) {
+    res.status(400).send(renderErrorPage('Invalid Discord ID'));
+    return;
+  }
+
+  // Validate FID
+  const fidNum = parseInt(fid, 10);
+  if (!fid || isNaN(fidNum) || fidNum < 1) {
+    res.send(renderFarcasterVerifyPage(discord_id, 'Please enter a valid Farcaster ID'));
+    return;
+  }
+
+  // Validate wallet if provided
+  let walletAddress = wallet?.trim() || '';
+  if (walletAddress && !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+    res.send(renderFarcasterVerifyPage(discord_id, 'Invalid wallet address format'));
+    return;
+  }
+
+  // If no wallet provided, try to get one from Farcaster
+  if (!walletAddress) {
+    const farcasterWallets = await getFarcasterWallets(fidNum);
+    if (farcasterWallets.length > 0) {
+      walletAddress = farcasterWallets[0];
+    } else {
+      res.send(renderFarcasterVerifyPage(discord_id, 'No wallets found for this FID. Please enter a wallet address.'));
+      return;
+    }
+  }
+
+  // Generate session and store pending verification
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  await supabaseDatabase.storePending(sessionId, fidNum, walletAddress);
+
+  // Redirect to Discord OAuth
+  const params = new URLSearchParams({
+    client_id: DISCORD_CLIENT_ID,
+    redirect_uri: DISCORD_REDIRECT_URI,
+    response_type: 'code',
+    scope: 'identify guilds.join',
+    state: sessionId
+  });
+
+  res.redirect(`https://discord.com/api/oauth2/authorize?${params.toString()}`);
+});
+
+// Wallet verification from Discord button
+app.get('/auth/wallet-connect', authLimiter, async (req: Request, res: Response) => {
+  const { discord_id } = req.query;
+
+  if (!discord_id || !/^\d{17,20}$/.test(discord_id as string)) {
+    res.status(400).send(renderErrorPage('Invalid or missing Discord ID'));
+    return;
+  }
+
+  res.send(renderWalletVerifyPage(discord_id as string));
+});
+
+app.post('/auth/wallet-connect', authLimiter, async (req: Request, res: Response) => {
+  const { discord_id, wallet } = req.body;
+
+  // Validate discord_id
+  if (!discord_id || !/^\d{17,20}$/.test(discord_id)) {
+    res.status(400).send(renderErrorPage('Invalid Discord ID'));
+    return;
+  }
+
+  // Validate wallet
+  const walletAddress = wallet?.trim() || '';
+  if (!walletAddress || !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+    res.send(renderWalletVerifyPage(discord_id, 'Please enter a valid wallet address'));
+    return;
+  }
+
+  // Generate session and store pending verification with fid=0 for wallet-only
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  await supabaseDatabase.storePending(sessionId, 0, walletAddress);
+
+  // Redirect to Discord OAuth
+  const params = new URLSearchParams({
+    client_id: DISCORD_CLIENT_ID,
+    redirect_uri: DISCORD_REDIRECT_URI,
+    response_type: 'code',
+    scope: 'identify guilds.join',
+    state: sessionId
+  });
+
+  res.redirect(`https://discord.com/api/oauth2/authorize?${params.toString()}`);
 });
 
 // HTML page renderers
@@ -317,6 +466,141 @@ function renderErrorPage(message: string): string {
       <div class="title">Verification Error</div>
       <div class="info">${message}</div>
       <p style="margin-top: 30px; color: #666;">You can close this window now.</p>
+    </body>
+    </html>
+  `;
+}
+
+function renderFarcasterVerifyPage(discordId: string, error?: string): string {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Verify with Farcaster</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body {
+          font-family: system-ui, -apple-system, sans-serif;
+          max-width: 400px;
+          margin: 80px auto;
+          padding: 20px;
+          background: #0f0f0f;
+          color: #fff;
+        }
+        .title { font-size: 24px; font-weight: bold; margin-bottom: 10px; text-align: center; }
+        .subtitle { color: #999; margin-bottom: 30px; text-align: center; font-size: 14px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; color: #ccc; font-size: 14px; }
+        input {
+          width: 100%;
+          padding: 12px;
+          border: 1px solid #333;
+          border-radius: 8px;
+          background: #1a1a1a;
+          color: #fff;
+          font-size: 16px;
+          box-sizing: border-box;
+        }
+        input:focus { outline: none; border-color: #9333ea; }
+        .button {
+          width: 100%;
+          padding: 14px;
+          background: #9333ea;
+          color: white;
+          border: none;
+          border-radius: 8px;
+          font-size: 16px;
+          font-weight: 500;
+          cursor: pointer;
+        }
+        .button:hover { background: #7c22ce; }
+        .error { color: #ef4444; margin-bottom: 20px; text-align: center; }
+        .help { color: #666; font-size: 12px; margin-top: 8px; }
+      </style>
+    </head>
+    <body>
+      <div class="title">Verify with Farcaster</div>
+      <div class="subtitle">Enter your Farcaster ID to verify Protardio ownership</div>
+      ${error ? `<div class="error">${error}</div>` : ''}
+      <form method="POST" action="/verify">
+        <input type="hidden" name="discord_id" value="${discordId}" />
+        <div class="form-group">
+          <label>Farcaster ID (FID)</label>
+          <input type="number" name="fid" placeholder="e.g. 12345" required min="1" />
+          <div class="help">Find your FID on Warpcast profile settings</div>
+        </div>
+        <div class="form-group">
+          <label>Wallet Address (optional)</label>
+          <input type="text" name="wallet" placeholder="0x..." pattern="^0x[a-fA-F0-9]{40}$" />
+          <div class="help">Override if your NFT is in a wallet not linked to Farcaster</div>
+        </div>
+        <button type="submit" class="button">Continue with Discord</button>
+      </form>
+    </body>
+    </html>
+  `;
+}
+
+function renderWalletVerifyPage(discordId: string, error?: string): string {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Verify with Wallet</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body {
+          font-family: system-ui, -apple-system, sans-serif;
+          max-width: 400px;
+          margin: 80px auto;
+          padding: 20px;
+          background: #0f0f0f;
+          color: #fff;
+        }
+        .title { font-size: 24px; font-weight: bold; margin-bottom: 10px; text-align: center; }
+        .subtitle { color: #999; margin-bottom: 30px; text-align: center; font-size: 14px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; color: #ccc; font-size: 14px; }
+        input {
+          width: 100%;
+          padding: 12px;
+          border: 1px solid #333;
+          border-radius: 8px;
+          background: #1a1a1a;
+          color: #fff;
+          font-size: 16px;
+          box-sizing: border-box;
+        }
+        input:focus { outline: none; border-color: #9333ea; }
+        .button {
+          width: 100%;
+          padding: 14px;
+          background: #9333ea;
+          color: white;
+          border: none;
+          border-radius: 8px;
+          font-size: 16px;
+          font-weight: 500;
+          cursor: pointer;
+        }
+        .button:hover { background: #7c22ce; }
+        .error { color: #ef4444; margin-bottom: 20px; text-align: center; }
+        .help { color: #666; font-size: 12px; margin-top: 8px; }
+      </style>
+    </head>
+    <body>
+      <div class="title">Verify with Wallet</div>
+      <div class="subtitle">Enter your wallet address holding Protardio NFTs</div>
+      ${error ? `<div class="error">${error}</div>` : ''}
+      <form method="POST" action="/auth/wallet-connect">
+        <input type="hidden" name="discord_id" value="${discordId}" />
+        <div class="form-group">
+          <label>Wallet Address</label>
+          <input type="text" name="wallet" placeholder="0x..." required pattern="^0x[a-fA-F0-9]{40}$" />
+          <div class="help">Enter the wallet address that holds your Protardio NFT</div>
+        </div>
+        <button type="submit" class="button">Continue with Discord</button>
+      </form>
     </body>
     </html>
   `;

@@ -33,6 +33,37 @@ async function setupProtardioServer() {
   const guild = await client.guilds.fetch(getGuildId());
   console.log(`✅ Connected to: ${guild.name}\n`);
 
+  // Check bot permissions
+  console.log('🔑 Checking bot permissions...');
+  const botMember = await guild.members.fetch(client.user!.id);
+  const permissions = botMember.permissions;
+
+  const requiredPerms = [
+    { flag: PermissionFlagsBits.ManageRoles, name: 'Manage Roles' },
+    { flag: PermissionFlagsBits.ManageChannels, name: 'Manage Channels' },
+    { flag: PermissionFlagsBits.CreateInstantInvite, name: 'Create Instant Invite' },
+    { flag: PermissionFlagsBits.SendMessages, name: 'Send Messages' },
+    { flag: PermissionFlagsBits.EmbedLinks, name: 'Embed Links' },
+    { flag: PermissionFlagsBits.ManageWebhooks, name: 'Manage Webhooks' },
+  ];
+
+  let missingPerms: string[] = [];
+  for (const perm of requiredPerms) {
+    if (permissions.has(perm.flag)) {
+      console.log(`  ✅ ${perm.name}`);
+    } else {
+      console.log(`  ❌ ${perm.name} - MISSING`);
+      missingPerms.push(perm.name);
+    }
+  }
+
+  if (missingPerms.length > 0) {
+    console.log(`\n⚠️  Bot is missing permissions: ${missingPerms.join(', ')}`);
+    console.log('   Re-invite the bot with proper permissions or grant them manually.\n');
+  } else {
+    console.log('  ✅ All required permissions granted\n');
+  }
+
   // STEP 0: Clean up duplicate channels and categories
   console.log('🧹 Cleaning up...');
 

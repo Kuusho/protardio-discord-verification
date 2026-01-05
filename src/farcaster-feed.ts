@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const FARCASTER_CHANNEL_NAME = 'farcaster-feed';
-const POLL_INTERVAL = 5 * 60 * 1000; // Check every 5 minutes
+const POLL_INTERVAL = 15 * 60 * 1000; // Check every 15 minutes
 
 // FIDs to track - add the FIDs you want to follow here
 // Example: [1234, 5678] would track those specific users
@@ -14,7 +14,9 @@ const TRACKED_FIDS = process.env.TRACKED_FARCASTER_FIDS
   : [];
 
 let farcasterChannel: TextChannel | null = null;
-let lastCastTimestamp = Math.floor(Date.now() / 1000);
+// Track server start time - only post casts newer than this
+const serverStartTime = Date.now();
+// In-memory dedup
 const postedCastHashes = new Set<string>();
 
 interface Cast {
@@ -81,10 +83,15 @@ async function checkForNewCasts(): Promise<void> {
   try {
     const casts = await getRecentCasts(TRACKED_FIDS, 20) as Cast[];
 
-    // Filter out already posted casts and replies
+    // Filter out already posted, replies, and casts from before server start
     const newCasts = casts.filter(cast => {
       if (postedCastHashes.has(cast.hash)) return false;
       if (cast.parent_hash) return false; // Skip replies
+
+      // Only post casts created AFTER server started (prevents flood on restart)
+      const castTime = new Date(cast.timestamp).getTime();
+      if (castTime < serverStartTime) return false;
+
       return true;
     });
 
@@ -94,13 +101,13 @@ async function checkForNewCasts(): Promise<void> {
       postedCastHashes.add(cast.hash);
 
       // Keep the set from growing too large
-      if (postedCastHashes.size > 1000) {
-        const oldHashes = Array.from(postedCastHashes).slice(0, 500);
+      if (postedCastHashes.size > 500) {
+        const oldHashes = Array.from(postedCastHashes).slice(0, 250);
         oldHashes.forEach(h => postedCastHashes.delete(h));
       }
 
       // Small delay between posts
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
   } catch (error) {
     console.error('Error checking for new casts:', error);
@@ -115,6 +122,9 @@ async function postCast(cast: Cast): Promise<void> {
 
   const warpcastUrl = `https://warpcast.com/${cast.author.username}/${cast.hash.slice(0, 10)}`;
 
+  // Handle empty cast text
+  const castText = cast.text?.trim() || '[No text content]';
+
   const embed = new EmbedBuilder()
     .setColor(0x8B5CF6) // Farcaster purple
     .setAuthor({
@@ -122,7 +132,7 @@ async function postCast(cast: Cast): Promise<void> {
       iconURL: cast.author.pfp_url,
       url: `https://warpcast.com/${cast.author.username}`
     })
-    .setDescription(cast.text.slice(0, 4000)) // Discord limit
+    .setDescription(castText.slice(0, 4000)) // Discord limit
     .setTimestamp(new Date(cast.timestamp))
     .setFooter({ text: 'Farcaster' });
 
