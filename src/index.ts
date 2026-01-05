@@ -23,7 +23,7 @@ app.use((req, res, next) => {
 // Rate limiting for auth endpoints
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 requests per IP
+  max: 200, // 200 requests per IP
   message: 'Too many verification attempts, please try again later'
 });
 
